@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Pencil, Eraser, Square, Circle, Type, Palette, Download, FileImage, FileText, MessageCircle } from 'lucide-react';
+import { Pencil, Eraser, Square, Circle, Undo, Redo, Download } from 'lucide-react';
 import { socketClient } from '../lib/socket';
 import { apiClient } from '../lib/api';
 
@@ -25,13 +25,15 @@ interface DrawingData {
 export const Whiteboard = ({ roomId }: WhiteboardProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [tool, setTool] = useState<'pen' | 'eraser' | 'rectangle' | 'circle' | 'text'>('pen');
+  const [tool, setTool] = useState<'pen' | 'eraser' | 'rectangle' | 'circle'>('pen');
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [lastPoint, setLastPoint] = useState<{x: number, y: number} | null>(null);
   const [startPoint, setStartPoint] = useState<{x: number, y: number} | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const [remoteCursors, setRemoteCursors] = useState<{[userId: string]: {x: number, y: number, username: string}}>({});
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -41,24 +43,26 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas size
     canvas.width = canvas.offsetWidth;
     canvas.height = canvas.offsetHeight;
 
-    // Set overlay canvas size
     if (overlayCanvas) {
       overlayCanvas.width = canvas.offsetWidth;
       overlayCanvas.height = canvas.offsetHeight;
     }
 
-    // Set default styles
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Load existing board state
+    // Save initial blank state
+    setTimeout(() => {
+      const imageData = canvas.toDataURL();
+      setHistory([imageData]);
+      setHistoryIndex(0);
+    }, 100);
+    
     loadBoardState();
 
-    // Listen for drawing updates from other users
     const handleDrawingUpdate = (data: DrawingData) => {
       if (data.type === 'draw' && data.x !== undefined && data.y !== undefined) {
         drawOnCanvas(data.x, data.y, data.prevX, data.prevY, data.color || '#000000', data.strokeWidth || 2, data.tool || 'pen');
@@ -74,14 +78,12 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
       }
     };
 
-    // Set up socket listener
     const socket = socketClient.getSocket();
     if (socket) {
       socket.on('drawing-update', handleDrawingUpdate);
     }
 
     return () => {
-      // Cleanup socket listeners
       if (socket) {
         socket.off('drawing-update', handleDrawingUpdate);
       }
@@ -135,6 +137,9 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
+    // Save state before starting to draw
+    saveToHistory();
+    
     setIsDrawing(true);
     setLastPoint({ x, y });
     setStartPoint({ x, y });
@@ -149,7 +154,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // Send cursor position to other users
     socketClient.sendDrawingUpdate({
       type: 'cursor',
       x,
@@ -160,10 +164,8 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
 
     if (tool === 'pen' || tool === 'eraser') {
       if (!lastPoint) return;
-      // Draw locally
       drawOnCanvas(x, y, lastPoint.x, lastPoint.y);
       
-      // Send to other users immediately
       socketClient.sendDrawingUpdate({
         type: 'draw' as const,
         x,
@@ -177,7 +179,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
       
       setLastPoint({ x, y });
     } else if ((tool === 'rectangle' || tool === 'circle') && startPoint && overlayCanvas) {
-      // Clear overlay and draw preview shape
       const overlayCtx = overlayCanvas.getContext('2d');
       if (overlayCtx) {
         overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -220,7 +221,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
       const width = x - startPoint.x;
       const height = y - startPoint.y;
       
-      // Clear overlay
       if (overlayCanvas) {
         const overlayCtx = overlayCanvas.getContext('2d');
         if (overlayCtx) {
@@ -228,10 +228,8 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
         }
       }
       
-      // Draw final shape on main canvas
       drawShape(startPoint.x, startPoint.y, width, height);
       
-      // Send to other users
       const shapeData = {
         type: 'shape' as const,
         x: startPoint.x,
@@ -244,7 +242,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
       };
       socketClient.sendDrawingUpdate(shapeData);
       
-      // Save board state after shape
       setTimeout(saveBoardState, 100);
     }
 
@@ -294,6 +291,59 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     }
   };
 
+  const saveToHistory = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const imageData = canvas.toDataURL();
+    setHistory(prev => {
+      const newHistory = prev.slice(0, historyIndex + 1);
+      newHistory.push(imageData);
+      return newHistory;
+    });
+    setHistoryIndex(prev => prev + 1);
+  };
+
+  const undo = () => {
+    if (historyIndex <= 0) return;
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const newIndex = historyIndex - 1;
+    setHistoryIndex(newIndex);
+    
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = history[newIndex];
+  };
+
+  const redo = () => {
+    if (historyIndex >= history.length - 1) return;
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const newIndex = historyIndex + 1;
+    setHistoryIndex(newIndex);
+    
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = history[newIndex];
+  };
+
   const exportAsImage = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -304,24 +354,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     link.click();
   };
 
-  const exportAsPDF = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    // Dynamic import for jsPDF to reduce bundle size
-    const { jsPDF } = await import('jspdf');
-    
-    const imgData = canvas.toDataURL('image/png');
-    const pdf = new jsPDF({
-      orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
-      unit: 'px',
-      format: [canvas.width, canvas.height]
-    });
-    
-    pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-    pdf.save(`whiteboard-${roomId}-${new Date().toISOString().split('T')[0]}.pdf`);
-  };
-
   const clearCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -329,12 +361,12 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Save state before clearing
+    saveToHistory();
     
-    // Save cleared state
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     saveBoardState();
     
-    // Send clear command to other users
     socketClient.sendDrawingUpdate({
       type: 'clear'
     });
@@ -344,9 +376,8 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
 
   return (
     <div className="flex-1 flex">
-      {/* Left Sidebar - Miro Style */}
+      {/* Left Sidebar */}
       <div className="w-12 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-2">
-        {/* Tools */}
         <button
           onClick={() => setTool('pen')}
           className={`p-2 rounded-lg transition-colors ${
@@ -384,19 +415,46 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
           <Circle className="w-5 h-5" />
         </button>
         
-        {/* Divider */}
         <div className="w-8 h-px bg-gray-300 my-2"></div>
         
-        {/* Color Palette */}
+        <button
+          onClick={undo}
+          disabled={historyIndex <= 0}
+          className={`p-2 rounded-lg transition-colors ${
+            historyIndex <= 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-100'
+          }`}
+          title="Undo"
+        >
+          <Undo className="w-5 h-5" />
+        </button>
+        <button
+          onClick={redo}
+          disabled={historyIndex >= history.length - 1}
+          className={`p-2 rounded-lg transition-colors ${
+            historyIndex >= history.length - 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-100'
+          }`}
+          title="Redo"
+        >
+          <Redo className="w-5 h-5" />
+        </button>
+        
+        <div className="w-8 h-px bg-gray-300 my-2"></div>
+        
         <div className="w-6 h-6 rounded border-2 border-gray-300 cursor-pointer" 
              style={{ backgroundColor: color }}
              title="Current Color"
         ></div>
         
-        {/* Divider */}
         <div className="w-8 h-px bg-gray-300 my-2"></div>
         
-        {/* Clear */}
+        <button
+          onClick={exportAsImage}
+          className="p-2 rounded-lg hover:bg-green-100 text-green-600 transition-colors"
+          title="Download PNG"
+        >
+          <Download className="w-5 h-5" />
+        </button>
+        
         <button
           onClick={clearCanvas}
           className="p-2 rounded-lg hover:bg-red-100 text-red-600 transition-colors"
@@ -410,7 +468,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
       <div className="flex-1 flex flex-col">
         {/* Top Toolbar */}
         <div className="h-12 bg-white border-b border-gray-200 flex items-center px-4 gap-4">
-          {/* Colors */}
           <div className="flex items-center gap-2">
             {colors.map((c) => (
               <button
@@ -422,35 +479,8 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
                 style={{ backgroundColor: c }}
               />
             ))}
-            <div className="relative">
-              <input
-                type="color"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-                className="absolute inset-0 w-6 h-6 opacity-0 cursor-pointer"
-                title="Choose custom color"
-              />
-              <div className="w-6 h-6 flex items-center justify-center cursor-pointer">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <circle cx="12" cy="12" r="10" fill="url(#colorGradient)" />
-                  <path d="M8 16L16 8M16 8H12M16 8V12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <defs>
-                    <linearGradient id="colorGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#ff0000" />
-                      <stop offset="16.66%" stopColor="#ff8800" />
-                      <stop offset="33.33%" stopColor="#ffff00" />
-                      <stop offset="50%" stopColor="#00ff00" />
-                      <stop offset="66.66%" stopColor="#0088ff" />
-                      <stop offset="83.33%" stopColor="#8800ff" />
-                      <stop offset="100%" stopColor="#ff0088" />
-                    </linearGradient>
-                  </defs>
-                </svg>
-              </div>
-            </div>
           </div>
 
-          {/* Stroke Width */}
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-600">{strokeWidth}px</span>
             <input
@@ -473,7 +503,7 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
               onMouseDown={startDrawing}
               onMouseMove={draw}
               onMouseUp={stopDrawing}
-              onMouseLeave={(e) => {
+              onMouseLeave={() => {
                 const overlayCanvas = overlayCanvasRef.current;
                 if (overlayCanvas) {
                   const overlayCtx = overlayCanvas.getContext('2d');
@@ -491,7 +521,6 @@ export const Whiteboard = ({ roomId }: WhiteboardProps) => {
               className="absolute inset-0 w-full h-full pointer-events-none"
             />
             
-            {/* Remote Cursors */}
             {Object.entries(remoteCursors).map(([userId, cursor]) => (
               <div
                 key={userId}

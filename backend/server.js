@@ -8,7 +8,12 @@ const app=require('./app');
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: true,
+        origin: function (origin, callback) {
+            // Allow requests with no origin
+            if (!origin) return callback(null, true);
+            // Allow all origins for development
+            return callback(null, true);
+        },
         credentials: true,
         methods: ['GET', 'POST']
     },

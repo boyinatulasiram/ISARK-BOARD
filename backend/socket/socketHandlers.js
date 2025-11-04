@@ -138,6 +138,19 @@ const handleConnection = (io) => {
             });
         });
 
+        // --- Voice Ready (WebRTC connection initiation) ---
+        socket.on('voice-ready', (data) => {
+            if (!socket.roomCode) return;
+            
+            console.log(`🎙️ User ${socket.user.username} is ready for voice chat`);
+            
+            // Broadcast to all other users in the room
+            socket.to(socket.roomCode).emit('voice-ready', {
+                userId: socket.userId,
+                username: socket.user.username
+            });
+        });
+
         // --- WebRTC Voice Chat Signaling ---
         socket.on("webrtc-offer", (data) => {
             if (!socket.roomCode) return;

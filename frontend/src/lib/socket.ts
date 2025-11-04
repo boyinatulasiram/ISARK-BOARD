@@ -115,6 +115,25 @@ class SocketClient {
     }
   }
 
+  // WebRTC Voice Chat Methods
+  sendWebRTCOffer(offer: RTCSessionDescriptionInit) {
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('webrtc-offer', { offer });
+    }
+  }
+
+  sendWebRTCAnswer(answer: RTCSessionDescriptionInit) {
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('webrtc-answer', { answer });
+    }
+  }
+
+  sendWebRTCIceCandidate(candidate: RTCIceCandidateInit) {
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('webrtc-ice-candidate', { candidate });
+    }
+  }
+
   getSocket() {
     return this.socket;
   }

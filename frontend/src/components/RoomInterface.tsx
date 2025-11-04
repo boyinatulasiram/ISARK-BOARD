@@ -5,7 +5,7 @@ import { Zap, LogOut, Moon, Sun, Users, Copy, Check, ArrowLeft, MessageCircle, X
 import { apiClient, Room, User } from '../lib/api';
 import { socketClient } from '../lib/socket';
 import { Whiteboard } from './Whiteboard';
-import { Chat } from './Chat';
+import { VoiceChat } from './VoiceChat';
 
 type RoomInterfaceProps = {
   roomId: string;
@@ -22,6 +22,8 @@ export const RoomInterface = ({ roomId, onLeave }: RoomInterfaceProps) => {
   const [showChat, setShowChat] = useState(false);
   const [newMessage, setNewMessage] = useState('');
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [aiSummary, setAiSummary] = useState('');
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -148,6 +150,104 @@ export const RoomInterface = ({ roomId, onLeave }: RoomInterfaceProps) => {
     onLeave();
   };
 
+  const generateAISummary = async () => {
+    setIsGeneratingSummary(true);
+    
+    try {
+      // Find the main drawing canvas (not overlay canvases)
+      const canvases = document.querySelectorAll('canvas');
+      let mainCanvas = null;
+      
+      // Look for the canvas with actual content
+      for (const canvas of canvases) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imageData.data;
+          
+          // Check if canvas has non-transparent pixels
+          let hasContent = false;
+          for (let i = 3; i < data.length; i += 4) {
+            if (data[i] > 0) { // Alpha channel > 0
+              hasContent = true;
+              break;
+            }
+          }
+          
+          if (hasContent) {
+            mainCanvas = canvas;
+            break;
+          }
+        }
+      }
+      
+      if (!mainCanvas && canvases.length > 0) {
+        // Fallback to the largest canvas
+        mainCanvas = Array.from(canvases).reduce((largest, canvas) => 
+          (canvas.width * canvas.height) > (largest.width * largest.height) ? canvas : largest
+        );
+      }
+      
+      if (!mainCanvas) {
+        setAiSummary('Error: No whiteboard canvas found');
+        return;
+      }
+
+      console.log('Using canvas:', mainCanvas.width, 'x', mainCanvas.height);
+
+      // Create a new canvas with white background
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = mainCanvas.width;
+      tempCanvas.height = mainCanvas.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      
+      if (tempCtx) {
+        // Fill with white background
+        tempCtx.fillStyle = '#ffffff';
+        tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+        
+        // Draw the original canvas content on top
+        tempCtx.drawImage(mainCanvas, 0, 0);
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        tempCanvas.toBlob(resolve, 'image/png', 1.0);
+      });
+
+      if (!blob) {
+        setAiSummary('Error: Failed to capture whiteboard image');
+        return;
+      }
+
+      console.log('Blob size:', blob.size);
+
+      const formData = new FormData();
+      formData.append('file', blob, 'whiteboard.png');
+      formData.append('image', blob, 'whiteboard.png');
+      
+      const response = await fetch('http://127.0.0.1:5000/upload-image', {
+        method: 'POST',
+        headers: {
+          'Authorization': import.meta.env.VITE_AI_API_TOKEN
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      setAiSummary(result.response || result.text || result.summary || 'No summary generated');
+      
+    } catch (error) {
+      console.error('Error:', error);
+      setAiSummary(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 transition-colors duration-300 flex flex-col">
       <nav className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 transition-colors duration-300">
@@ -261,6 +361,12 @@ export const RoomInterface = ({ roomId, onLeave }: RoomInterfaceProps) => {
                 )}
               </div>
               
+
+              <VoiceChat 
+                roomId={roomId} 
+                userId={user?._id || ''} 
+                username={user?.username || ''} 
+              />
               <button
                 onClick={() => setShowChat(!showChat)}
                 className={`p-2 rounded-lg transition-colors duration-200 ${
@@ -295,13 +401,56 @@ export const RoomInterface = ({ roomId, onLeave }: RoomInterfaceProps) => {
       </nav>
 
       <div className="flex-1 flex relative">
-        <main className="flex-1 flex">
+        <main className="flex-1 flex relative">
           <Whiteboard roomId={roomId} />
+          
+          {/* AI Summary Button - Bottom Right */}
+          <button
+            onClick={generateAISummary}
+            disabled={isGeneratingSummary}
+            className="fixed bottom-6 right-6 bg-gradient-to-r from-purple-500 to-purple-600 text-white px-6 py-4 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 disabled:opacity-50 z-40 text-lg font-semibold"
+          >
+            {isGeneratingSummary ? 'Generating...' : 'AI Summary'}
+          </button>
+          
+          {/* AI Summary Loading Overlay */}
+          {isGeneratingSummary && (
+            <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg p-6 flex items-center gap-3 shadow-xl">
+                <div className="w-6 h-6 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+                <span className="text-gray-700 font-medium">Generating AI Summary...</span>
+              </div>
+            </div>
+          )}
         </main>
         
+        {/* AI Summary Panel */}
+        {aiSummary && (
+          <aside className="w-80 bg-gradient-to-b from-purple-50 to-white border-l border-purple-200 flex flex-col shadow-lg">
+            <div className="flex items-center justify-between p-4 border-b border-purple-200">
+              <div className="flex items-center gap-2">
+                <div className="w-5 h-5 bg-gradient-to-r from-purple-500 to-purple-600 rounded"></div>
+                <h3 className="font-semibold text-gray-800">AI Summary</h3>
+              </div>
+              <button
+                onClick={() => setAiSummary('')}
+                className="p-1 hover:bg-purple-100 rounded"
+              >
+                <X className="w-4 h-4 text-gray-600" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                {aiSummary}
+              </div>
+            </div>
+          </aside>
+        )}
+
         {/* Chat Sidebar */}
         {showChat && (
-          <aside className="w-80 bg-white border-l border-gray-200 flex flex-col shadow-lg">
+          <aside className={`w-80 bg-white border-l border-gray-200 flex flex-col shadow-lg ${aiSummary ? 'border-l-0' : ''}`}>
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="font-semibold text-gray-800">Chat</h3>
               <button
